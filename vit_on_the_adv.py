@@ -261,4 +261,4 @@ def vit_base_patch16_224_in21k(pretrained=False, patch_size=16, args=None, **kwa
     model = _create_vision_transformer('vit_base_patch16_224_in21k', pretrained=pretrained, args=args, **model_kwargs)
     pytorch_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     pytorch_total_params = sum(p.numel() for p in model.parameters())
-    return
+    return model
