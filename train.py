@@ -16,26 +16,30 @@ import models
 
 from datetime import datetime
 from utils import rob_acc, l2_norm_batch, get_input_grad, clamp
+from vit_on_the_adv import vit_base_patch16_224_in21k
 
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', default=128, type=int)
     parser.add_argument('--data_dir', default='../cifar-data', type=str)
-    parser.add_argument('--dataset', default='cifar10', choices=['mnist', 'svhn', 'cifar10', 'cifar10_binary', 'cifar10_binary_gs',
-                                                                 'uniform_noise', 'imagenet'], type=str)
+    parser.add_argument('--dataset', default='cifar10',
+                        choices=['mnist', 'svhn', 'cifar10', 'cifar10_binary', 'cifar10_binary_gs',
+                                 'uniform_noise', 'imagenet'], type=str)
     parser.add_argument('--model', default='resnet18', choices=['resnet18', 'lenet', 'cnn'], type=str)
     parser.add_argument('--epochs', default=30, type=int,
                         help='15 epochs to reach 45% adv acc, 30 epochs to reach the reported clean/adv accs')
     parser.add_argument('--lr_schedule', default='cyclic', choices=['cyclic', 'piecewise'])
     parser.add_argument('--lr_max', default=0.2, type=float, help='0.05 in Table 1, 0.2 in Figure 2')
-    parser.add_argument('--attack', default='fgsm', type=str, choices=['pgd', 'pgd_corner', 'fgsm', 'random_corner', 'free', 'none'])
+    parser.add_argument('--attack', default='fgsm', type=str,
+                        choices=['pgd', 'pgd_corner', 'fgsm', 'random_corner', 'free', 'none'])
     parser.add_argument('--eps', default=8.0, type=float)
     parser.add_argument('--attack_iters', default=10, type=int, help='n_iter of pgd for evaluation')
     parser.add_argument('--pgd_train_n_iters', default=10, type=int, help='n_iter of pgd for training (if attack=pgd)')
     parser.add_argument('--pgd_alpha_train', default=2.0, type=float)
     parser.add_argument('--fgsm_alpha', default=1.25, type=float)
-    parser.add_argument('--minibatch_replay', default=1, type=int, help='minibatch replay as in AT for Free (default=1 is usual training)')
+    parser.add_argument('--minibatch_replay', default=1, type=int,
+                        help='minibatch replay as in AT for Free (default=1 is usual training)')
     parser.add_argument('--weight_decay', default=5e-4, type=float, help='weight decay aka l2 regularization')
     parser.add_argument('--attack_init', default='random', choices=['zero', 'random'])
     parser.add_argument('--fname', default='plain_cifar10', type=str)
@@ -43,14 +47,23 @@ def get_args():
     parser.add_argument('--gpu', default=0, type=int)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--half_prec', action='store_true', help='if enabled, runs everything as half precision')
-    parser.add_argument('--grad_align_cos_lambda', default=0.0, type=float, help='coefficient of the cosine gradient alignment regularizer')
-    parser.add_argument('--eval_early_stopped_model', action='store_true', help='whether to evaluate the model obtained via early stopping')
+    parser.add_argument('--grad_align_cos_lambda', default=0.0, type=float,
+                        help='coefficient of the cosine gradient alignment regularizer')
+    parser.add_argument('--eval_early_stopped_model', action='store_true',
+                        help='whether to evaluate the model obtained via early stopping')
     parser.add_argument('--eval_iter_freq', default=200, type=int, help='how often to evaluate test stats')
-    parser.add_argument('--n_eval_every_k_iter', default=256, type=int, help='on how many examples to eval every k iters')
+    parser.add_argument('--n_eval_every_k_iter', default=256, type=int,
+                        help='on how many examples to eval every k iters')
     parser.add_argument('--n_layers', default=1, type=int, help='#layers on each conv layer (for model == cnn)')
     parser.add_argument('--n_filters_cnn', default=16, type=int, help='#filters on each conv layer (for model==cnn)')
-    parser.add_argument('--batch_size_eval', default=256, type=int, help='batch size for the final eval with pgd rr; 6 GB memory is consumed for 1024 examples with fp32 network')
-    parser.add_argument('--n_final_eval', default=-1, type=int, help='on how many examples to do the final evaluation; -1 means on all test examples.')
+    parser.add_argument('--batch_size_eval', default=256, type=int,
+                        help='batch size for the final eval with pgd rr; 6 GB memory is consumed for 1024 examples with fp32 network')
+    parser.add_argument('--n_final_eval', default=-1, type=int,
+                        help='on how many examples to do the final evaluation; -1 means on all test examples.')
+    parser.add_argument('--pretrained_vit', default=False, action='store_true',
+                        help='Use pretrained vision transformer or not')
+    parser.add_argument('--pretrain-pos-only', action='store_true')
+    parser.add_argument('--patch', type=int, default=4)
     return parser.parse_args()
 
 
@@ -62,7 +75,8 @@ def main():
     model_width = {'linear': '', 'cnn': args.n_filters_cnn, 'lenet': '', 'resnet18': ''}[args.model]
     model_str = '{}{}'.format(args.model, model_width)
     model_name = '{} dataset={} model={} eps={} attack={} m={} attack_init={} fgsm_alpha={} epochs={} pgd={}-{} grad_align_cos_lambda={} lr_max={} seed={}'.format(
-        cur_timestamp, args.dataset, model_str, args.eps, args.attack, args.minibatch_replay, args.attack_init, args.fgsm_alpha, args.epochs,
+        cur_timestamp, args.dataset, model_str, args.eps, args.attack, args.minibatch_replay, args.attack_init,
+        args.fgsm_alpha, args.epochs,
         args.pgd_alpha_train, args.pgd_train_n_iters, args.grad_align_cos_lambda, args.lr_max, args.seed)
     if not os.path.exists('models'):
         os.makedirs('models')
@@ -81,13 +95,25 @@ def main():
 
     eps, pgd_alpha, pgd_alpha_train = args.eps / 255, args.pgd_alpha / 255, args.pgd_alpha_train / 255
     train_data_augm = False if args.dataset in ['mnist'] else True
-    train_batches = data.get_loaders(args.dataset, -1, args.batch_size, train_set=True, shuffle=True, data_augm=train_data_augm)
-    train_batches_fast = data.get_loaders(args.dataset, n_eval_every_k_iter, args.batch_size, train_set=True, shuffle=False, data_augm=False)
-    test_batches = data.get_loaders(args.dataset, args.n_final_eval, args.batch_size_eval, train_set=False, shuffle=False, data_augm=False)
-    test_batches_fast = data.get_loaders(args.dataset, n_eval_every_k_iter, args.batch_size_eval, train_set=False, shuffle=False, data_augm=False)
-
-    model = models.get_model(args.model, n_cls, half_prec, data.shapes_dict[args.dataset], args.n_filters_cnn).cuda()
-    model.apply(utils.initialize_weights)
+    train_batches = data.get_loaders(args.dataset, -1, args.batch_size, train_set=True, shuffle=True,
+                                     data_augm=train_data_augm)
+    train_batches_fast = data.get_loaders(args.dataset, n_eval_every_k_iter, args.batch_size, train_set=True,
+                                          shuffle=False, data_augm=False)
+    test_batches = data.get_loaders(args.dataset, args.n_final_eval, args.batch_size_eval, train_set=False,
+                                    shuffle=False, data_augm=False)
+    test_batches_fast = data.get_loaders(args.dataset, n_eval_every_k_iter, args.batch_size_eval, train_set=False,
+                                         shuffle=False, data_augm=False)
+    num_classes = 10
+    if args.dataset == 'cifar10':
+        num_classes = 10
+    elif args.dataset == 'cifar100':
+        num_classes = 100
+    model = vit_base_patch16_224_in21k(pretrained=args.pretrained_vit,
+                                       img_size=32,
+                                       pretrain_pos_only=args.pretrain_pos_only,
+                                       patch_size=args.patch, num_classes=num_classes, args=args).cuda()
+    # model = models.get_model(args.model, n_cls, half_prec, data.shapes_dict[args.dataset], args.n_filters_cnn).cuda()
+    # model.apply(utils.initialize_weights)
     model.train()
 
     if args.model == 'resnet18':
@@ -96,6 +122,9 @@ def main():
         opt = torch.optim.Adam(model.parameters(), lr=args.lr_max, weight_decay=args.weight_decay)
     elif args.model == 'lenet':
         opt = torch.optim.Adam(model.parameters(), lr=args.lr_max, weight_decay=args.weight_decay)
+
+    elif args.model == 'vit':
+        opt = torch.optim.SGD(model.parameters(), lr=args.lr_max, momentum=0.9, weight_decay=args.weight_decay)
     else:
         raise ValueError('decide about the right optimizer for the new model')
 
@@ -165,7 +194,8 @@ def main():
 
                 n_alpha_warmup_epochs = 5
                 n_iterations_max_alpha = n_alpha_warmup_epochs * data.shapes_dict[args.dataset][0] // args.batch_size
-                fgsm_alpha = min(iteration / n_iterations_max_alpha * args.fgsm_alpha, args.fgsm_alpha) if args.dataset == 'svhn' else args.fgsm_alpha
+                fgsm_alpha = min(iteration / n_iterations_max_alpha * args.fgsm_alpha,
+                                 args.fgsm_alpha) if args.dataset == 'svhn' else args.fgsm_alpha
                 delta.data = clamp(delta.data + fgsm_alpha * argmax_delta, -eps, eps)
                 delta.data = clamp(X + delta.data, 0, 1) - X
 
@@ -191,7 +221,7 @@ def main():
             reg = torch.zeros(1).cuda()[0]  # for .item() to run correctly
             if args.grad_align_cos_lambda != 0.0:
                 grad2 = get_input_grad(model, X, y, opt, eps, half_prec, delta_init='random_uniform', backprop=True)
-                grads_nnz_idx = ((grad**2).sum([1, 2, 3])**0.5 != 0) * ((grad2**2).sum([1, 2, 3])**0.5 != 0)
+                grads_nnz_idx = ((grad ** 2).sum([1, 2, 3]) ** 0.5 != 0) * ((grad2 ** 2).sum([1, 2, 3]) ** 0.5 != 0)
                 grad1, grad2 = grad[grads_nnz_idx], grad2[grads_nnz_idx]
                 grad1_norms, grad2_norms = l2_norm_batch(grad1), l2_norm_batch(grad2)
                 grad1_normalized = grad1 / grad1_norms[:, None, None, None]
@@ -204,6 +234,7 @@ def main():
             if epoch != 0:
                 opt.zero_grad()
                 utils.backward(loss, opt, half_prec)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
                 opt.step()
 
             time_train += time.time() - time_start_iter
@@ -225,21 +256,26 @@ def main():
                 utils.model_eval(model, half_prec)
 
                 test_acc_clean, _, _ = rob_acc(test_batches_fast, model, eps, pgd_alpha, opt, half_prec, 0, 1)
-                test_acc_fgsm, test_loss_fgsm, fgsm_deltas = rob_acc(test_batches_fast, model, eps, eps, opt, half_prec, 1, 1, rs=False)
-                test_acc_pgd, test_loss_pgd, pgd_deltas = rob_acc(test_batches_fast, model, eps, pgd_alpha, opt, half_prec, args.attack_iters, 1)
+                test_acc_fgsm, test_loss_fgsm, fgsm_deltas = rob_acc(test_batches_fast, model, eps, eps, opt, half_prec,
+                                                                     1, 1, rs=False)
+                test_acc_pgd, test_loss_pgd, pgd_deltas = rob_acc(test_batches_fast, model, eps, pgd_alpha, opt,
+                                                                  half_prec, args.attack_iters, 1)
                 cos_fgsm_pgd = utils.avg_cos_np(fgsm_deltas, pgd_deltas)
-                train_acc_pgd, _, _ = rob_acc(train_batches_fast, model, eps, pgd_alpha, opt, half_prec, args.attack_iters, 1)  # needed for early stopping
+                train_acc_pgd, _, _ = rob_acc(train_batches_fast, model, eps, pgd_alpha, opt, half_prec,
+                                              args.attack_iters, 1)  # needed for early stopping
 
                 grad_x = utils.get_grad_np(model, test_batches_fast, eps, opt, half_prec, rs=False)
                 grad_eta = utils.get_grad_np(model, test_batches_fast, eps, opt, half_prec, rs=True)
                 cos_x_eta = utils.avg_cos_np(grad_x, grad_eta)
 
                 time_elapsed = time.time() - start_time
-                train_str = '[train] loss {:.3f}, reg {:.3f}, acc {:.2%} acc_pgd {:.2%}'.format(train_loss, train_reg, train_acc, train_acc_pgd)
+                train_str = '[train] loss {:.3f}, reg {:.3f}, acc {:.2%} acc_pgd {:.2%}'.format(train_loss, train_reg,
+                                                                                                train_acc,
+                                                                                                train_acc_pgd)
                 test_str = '[test] acc_clean {:.2%}, acc_fgsm {:.2%}, acc_pgd {:.2%}, cos_x_eta {:.3}, cos_fgsm_pgd {:.3}'.format(
                     test_acc_clean, test_acc_fgsm, test_acc_pgd, cos_x_eta, cos_fgsm_pgd)
                 logger.info('{}-{}: {}  {} ({:.2f}m, {:.2f}m)'.format(epoch, iteration, train_str, test_str,
-                                                                      time_train/60, time_elapsed/60))
+                                                                      time_train / 60, time_elapsed / 60))
 
                 if train_acc_pgd > train_acc_pgd_best:  # catastrophic overfitting can be detected on the training set
                     best_state_dict = copy.deepcopy(model.state_dict())
@@ -252,7 +288,8 @@ def main():
             X_prev, y_prev = X.clone(), y.clone()  # needed for Free-AT
 
         if epoch == args.epochs:
-            torch.save({'last': model.state_dict(), 'best': best_state_dict}, 'models/{} epoch={}.pth'.format(model_name, epoch))
+            torch.save({'last': model.state_dict(), 'best': best_state_dict},
+                       'models/{} epoch={}.pth'.format(model_name, epoch))
             # disable global conversion to fp16 from amp.initialize() (https://github.com/NVIDIA/apex/issues/567)
             context_manager = amp.disable_casts() if half_prec else utils.nullcontext()
             with context_manager:
@@ -262,16 +299,19 @@ def main():
                 utils.model_eval(model, half_prec)
                 opt = torch.optim.SGD(model.parameters(), lr=0)
 
-                attack_iters, n_restarts = (50, 10) if not args.debug else (10, 3)
+                attack_iters, n_restarts = (30, 3) if not args.debug else (10, 3)
                 test_acc_clean, _, _ = rob_acc(test_batches, model, eps, pgd_alpha, opt, half_prec, 0, 1)
-                test_acc_pgd_rr, _, deltas_pgd_rr = rob_acc(test_batches, model, eps, pgd_alpha, opt, half_prec, attack_iters, n_restarts)
-                logger.info('[last: test on 10k points] acc_clean {:.2%}, pgd_rr {:.2%}'.format(test_acc_clean, test_acc_pgd_rr))
+                test_acc_pgd_rr, _, deltas_pgd_rr = rob_acc(test_batches, model, eps, pgd_alpha, opt, half_prec,
+                                                            attack_iters, n_restarts)
+                logger.info('[last: test on 10k points] acc_clean {:.2%}, pgd_rr {:.2%}'.format(test_acc_clean,
+                                                                                                test_acc_pgd_rr))
 
                 if args.eval_early_stopped_model:
                     model.load_state_dict(best_state_dict)
                     utils.model_eval(model, half_prec)
                     test_acc_clean, _, _ = rob_acc(test_batches, model, eps, pgd_alpha, opt, half_prec, 0, 1)
-                    test_acc_pgd_rr, _, deltas_pgd_rr = rob_acc(test_batches, model, eps, pgd_alpha, opt, half_prec, attack_iters, n_restarts)
+                    test_acc_pgd_rr, _, deltas_pgd_rr = rob_acc(test_batches, model, eps, pgd_alpha, opt, half_prec,
+                                                                attack_iters, n_restarts)
                     logger.info('[best: test on 10k points][iter={}] acc_clean {:.2%}, pgd_rr {:.2%}'.format(
                         best_iteration, test_acc_clean, test_acc_pgd_rr))
 
